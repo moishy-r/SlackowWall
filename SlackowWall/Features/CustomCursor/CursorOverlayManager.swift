@@ -287,11 +287,9 @@ final class CursorOverlayManager {
 // MARK: - Overlay window
 
 private final class OverlayWindow: NSWindow {
-    private static let trailSegments = 12
-
     private let cursorLayer = CALayer()
     private let crosshairLayer = CAShapeLayer()
-    private var trailLayers: [CAShapeLayer] = []
+    private let trailLayer = TrailLayer()
 
     private var settings = Preferences.CursorSection()
     private var cursorSize: CGSize = .zero
@@ -314,14 +312,8 @@ private final class OverlayWindow: NSWindow {
         contentView = view
         guard let root = view.layer else { return }
 
-        for _ in 0..<Self.trailSegments {
-            let layer = CAShapeLayer()
-            layer.fillColor = nil
-            layer.lineCap = .round
-            layer.lineJoin = .round
-            root.addSublayer(layer)
-            trailLayers.append(layer)
-        }
+        trailLayer.frame = root.bounds
+        root.addSublayer(trailLayer)
         cursorLayer.contentsGravity = .resizeAspect
         root.addSublayer(cursorLayer)
         root.addSublayer(crosshairLayer)
@@ -371,13 +363,8 @@ private final class OverlayWindow: NSWindow {
         cursorLayer.bounds = CGRect(origin: .zero, size: cursorSize)
         crosshairLayer.bounds = CGRect(origin: .zero, size: cursorSize)
 
-        let count = Self.trailSegments
-        for (i, layer) in trailLayers.enumerated() {
-            let progress = Double(i + 1) / Double(count)
-            layer.strokeColor = settings.trailColor.cgColor
-            layer.opacity = Float(progress)
-            layer.lineWidth = settings.trailWidth * (0.3 + 0.7 * progress)
-        }
+        trailLayer.color = settings.trailColor
+        trailLayer.width = settings.trailWidth
         CATransaction.commit()
     }
 
@@ -395,23 +382,69 @@ private final class OverlayWindow: NSWindow {
         cursorLayer.isHidden = !visible || settings.style != .custom
         crosshairLayer.isHidden = !visible || settings.style != .crosshair
 
-        // Split the trail into segments that get thicker and more opaque toward the cursor.
-        let points = trail.map { CGPoint(x: $0.x - origin.x, y: $0.y - origin.y) }
-        let count = trailLayers.count
-        for (i, layer) in trailLayers.enumerated() {
-            guard points.count > 1 else {
-                layer.path = nil
-                continue
-            }
-            let start = (points.count - 1) * i / count
-            let end = (points.count - 1) * (i + 1) / count
-            guard end > start else {
-                layer.path = nil
-                continue
-            }
-            let path = CGMutablePath()
-            path.addLines(between: Array(points[start...end]))
-            layer.path = path
+        trailLayer.update(points: trail.map { CGPoint(x: $0.x - origin.x, y: $0.y - origin.y) })
+    }
+}
+
+// MARK: - Trail
+
+/// The trail's ribbon shape (see `TrailPath`) used as a mask over a gradient that fades
+/// from clear at the tail to the trail color at the cursor. Both are drawn by the GPU,
+/// so nothing is redrawn or stretched on the CPU each frame.
+private final class TrailLayer: CAGradientLayer {
+    private let shape = CAShapeLayer()
+
+    var width: Double = 6
+
+    var color = CodableColor.white {
+        didSet {
+            colors = [
+                CGColor(srgbRed: color.red, green: color.green, blue: color.blue, alpha: 0),
+                color.cgColor,
+            ]
         }
+    }
+
+    override init() {
+        super.init()
+        shape.fillColor = CGColor(gray: 1, alpha: 1)
+        shape.fillRule = .nonZero
+        mask = shape
+        isHidden = true
+    }
+
+    override init(layer: Any) {
+        super.init(layer: layer)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layoutSublayers() {
+        super.layoutSublayers()
+        shape.frame = bounds
+    }
+
+    func update(points: [CGPoint]) {
+        guard points.count > 1, bounds.width > 0, bounds.height > 0,
+            let path = TrailPath.ribbon(points: points, width: width)
+        else {
+            isHidden = true
+            shape.path = nil
+            return
+        }
+        shape.frame = bounds
+        shape.path = path
+
+        // Gradient runs from the oldest point to the cursor, in unit coordinates.
+        let tail = points[0]
+        var head = points[points.count - 1]
+        if hypot(head.x - tail.x, head.y - tail.y) < 1 {
+            head.x += 1
+        }
+        startPoint = CGPoint(x: tail.x / bounds.width, y: tail.y / bounds.height)
+        endPoint = CGPoint(x: head.x / bounds.width, y: head.y / bounds.height)
+        isHidden = false
     }
 }

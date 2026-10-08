@@ -52,7 +52,7 @@ struct KeyRemapSettings: View {
             SettingsLabel(
                 title: "Remaps",
                 description:
-                    "Click a box and press a key to set it. Modifier keys (Shift, Control, Option, Command) can't be remapped."
+                    "Click a box and press a key to set it. Modifier keys (Shift, Control, Option, Command, left or right) can be remapped to other modifiers, and only take effect in Minecraft."
             )
             .padding(.top, 5)
 
@@ -86,6 +86,10 @@ struct KeyRemapSettings: View {
                                 Image(systemName: "exclamationmark.triangle.fill")
                                     .foregroundStyle(.yellow)
                                     .popoverLabel("A key can't be remapped to itself")
+                            } else if remap.mixesModifierAndKey {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.yellow)
+                                    .popoverLabel("Modifier keys can only be remapped to other modifier keys")
                             }
 
                             Button(action: { delete(remap) }) {
@@ -101,6 +105,17 @@ struct KeyRemapSettings: View {
                 SettingsButtonView(
                     title: "Add Remap", buttonText: "Add",
                     action: { settings.remaps.append(KeyRemap()) })
+            }
+
+            SettingsLabel(title: "Minecraft")
+                .padding(.top, 5)
+
+            SettingsCardView {
+                SettingsToggleView(
+                    title: "Don't let ⌘Q quit Minecraft",
+                    description:
+                        "Pressing Q while holding Command no longer quits Minecraft, but Minecraft still sees Command held, so ⌘Q drops a whole stack. Works even when key remapping is turned off.",
+                    option: $settings.blockCommandQInMinecraft)
             }
         }
     }
@@ -128,7 +143,8 @@ struct KeyRemapSettings: View {
                 key.wrappedValue = nil
                 return
             }
-            if KeyCode.modifierFlags(code: primary) == nil {
+            // Caps Lock and Fn can't be remapped; the other modifiers can.
+            if KeyCode.modifierFlags(code: primary) == nil || ModifierKey.isRemappable(primary) {
                 key.wrappedValue = primary
             }
         }

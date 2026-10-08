@@ -11,6 +11,7 @@ extension Preferences {
     struct RemapSection: Codable, Hashable {
         var enabled: Bool = false
         var onlyInMinecraft: Bool = true
+        var blockCommandQInMinecraft: Bool = false
         var remaps: [KeyRemap] = []
 
         init() {}
@@ -25,6 +26,13 @@ struct KeyRemap: Codable, Hashable, Identifiable {
     var enabled: Bool = true
 
     var isValid: Bool {
-        enabled && from != nil && to != nil && from != to
+        guard enabled, let from, let to, from != to else { return false }
+        return !mixesModifierAndKey
+    }
+
+    /// Modifiers can only be remapped to other modifiers, and normal keys to normal keys.
+    var mixesModifierAndKey: Bool {
+        guard let from, let to else { return false }
+        return ModifierKey.isRemappable(from) != ModifierKey.isRemappable(to)
     }
 }

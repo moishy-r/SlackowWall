@@ -8,7 +8,8 @@ import Combine
 import CoreGraphics
 
 /// Rewrites key presses system-wide (or only in Minecraft) using a CGEvent tap,
-/// so pressing one key sends another, e.g. A → O.
+/// so pressing one key sends another, e.g. A → O. Modifier keys can be remapped to
+/// other modifiers (e.g. Left Control → Right Command), but only inside Minecraft.
 final class KeyRemapManager {
     static let shared = KeyRemapManager()
 
@@ -27,11 +28,16 @@ final class KeyRemapManager {
 
     /// from-key → to-key, rebuilt whenever settings change.
     private var mapping: [KeyCode: KeyCode] = [:]
+    /// Same, for modifier keys (Shift/Control/Option/Command). Only applied in Minecraft.
+    private var modifierMapping: [KeyCode: KeyCode] = [:]
     private var onlyInMinecraft = true
+    private var blockCommandQ = false
 
     /// Keys currently held down and the key they were sent as, so the key-up
     /// always matches the key-down even if settings or focus change mid-press.
     private var heldKeys: [KeyCode: KeyCode] = [:]
+    /// Modifiers currently held down and the modifier they were sent as.
+    private var heldModifiers: [KeyCode: KeyCode] = [:]
 
     private var minecraftPIDs: [pid_t: Bool] = [:]
     private var frontmostIsMinecraft = false
@@ -56,19 +62,27 @@ final class KeyRemapManager {
 
     private func apply(_ section: Preferences.RemapSection) {
         mapping = [:]
-        for remap in section.remaps where remap.isValid {
-            if let from = remap.from, let to = remap.to, mapping[from] == nil {
-                mapping[from] = to
+        modifierMapping = [:]
+        if section.enabled {
+            for remap in section.remaps where remap.isValid {
+                guard let from = remap.from, let to = remap.to else { continue }
+                if ModifierKey.isRemappable(from) {
+                    if modifierMapping[from] == nil { modifierMapping[from] = to }
+                } else if mapping[from] == nil {
+                    mapping[from] = to
+                }
             }
         }
         onlyInMinecraft = section.onlyInMinecraft
+        blockCommandQ = section.blockCommandQInMinecraft
 
-        if section.enabled && !mapping.isEmpty {
+        let wanted = !mapping.isEmpty || !modifierMapping.isEmpty || blockCommandQ
+        if wanted {
             startTap()
         } else {
             stopTap()
         }
-        updateRetryTimer(wanted: section.enabled && !mapping.isEmpty)
+        updateRetryTimer(wanted: wanted)
     }
 
     /// If the tap couldn't be created (usually Accessibility permission not granted yet),
@@ -108,9 +122,13 @@ final class KeyRemapManager {
     private func startTap() {
         guard eventTap == nil else { return }
 
-        let eventMask =
-            (1 << CGEventType.keyDown.rawValue)
-            | (1 << CGEventType.keyUp.rawValue)
+        let eventTypes: [CGEventType] = [
+            .keyDown, .keyUp, .flagsChanged,
+            // Clicks carry modifier flags too, so they're rewritten while a modifier is remapped.
+            .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown,
+            .otherMouseUp,
+        ]
+        let eventMask = eventTypes.reduce(0) { $0 | (1 << $1.rawValue) }
 
         eventTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -144,7 +162,9 @@ final class KeyRemapManager {
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: eventTap, enable: true)
-        LogManager.shared.appendLog("Key Remap: enabled with \(mapping.count) remap(s)")
+        LogManager.shared.appendLog(
+            "Key Remap: enabled with \(mapping.count + modifierMapping.count) remap(s),",
+            "block ⌘Q:", blockCommandQ)
     }
 
     private func stopTap() {
@@ -157,6 +177,7 @@ final class KeyRemapManager {
         self.eventTap = nil
         self.runLoopSource = nil
         heldKeys = [:]
+        heldModifiers = [:]
         LogManager.shared.appendLog("Key Remap: disabled")
     }
 
@@ -167,6 +188,19 @@ final class KeyRemapManager {
             return Unmanaged.passUnretained(event)
         }
 
+        switch type {
+            case .flagsChanged:
+                handleModifierChange(event)
+                return Unmanaged.passUnretained(event)
+            case .keyDown, .keyUp:
+                return handleKey(type: type, event: event)
+            default:
+                rewriteModifierFlags(event)
+                return Unmanaged.passUnretained(event)
+        }
+    }
+
+    private func handleKey(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let keyCode = KeyCode(event.getIntegerValueField(.keyboardEventKeycode))
         let isDown = type == .keyDown
 
@@ -180,18 +214,75 @@ final class KeyRemapManager {
             target = heldKeys.removeValue(forKey: keyCode)
         }
 
-        guard let target,
+        var output = event
+        var created = false
+        if let target,
             let remapped = CGEvent(
                 keyboardEventSource: CGEventSource(event: event), virtualKey: target,
                 keyDown: isDown)
-        else {
-            return Unmanaged.passUnretained(event)
+        {
+            remapped.flags = event.flags
+            remapped.setIntegerValueField(
+                .keyboardEventAutorepeat,
+                value: event.getIntegerValueField(.keyboardEventAutorepeat))
+            output = remapped
+            created = true
         }
 
-        remapped.flags = event.flags
-        remapped.setIntegerValueField(
-            .keyboardEventAutorepeat, value: event.getIntegerValueField(.keyboardEventAutorepeat))
-        return Unmanaged.passRetained(remapped)
+        rewriteModifierFlags(output)
+
+        // Minecraft drops a stack when it sees a Command key held while Q is pressed.
+        // Taking Command off the Q press itself stops macOS from treating it as "Quit",
+        // while Minecraft still sees Command held from the earlier modifier press.
+        if blockCommandQ && frontmostIsMinecraft && (target ?? keyCode) == .q
+            && output.flags.contains(.maskCommand)
+        {
+            output.flags = CGEventFlags(
+                rawValue: output.flags.rawValue
+                    & ~(CGEventFlags.maskCommand.rawValue | ModifierKey.commandDeviceBits))
+        }
+
+        return created ? Unmanaged.passRetained(output) : Unmanaged.passUnretained(output)
+    }
+
+    /// Handles a modifier key going down or up, sending it as its remapped modifier.
+    private func handleModifierChange(_ event: CGEvent) {
+        let keyCode = KeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        guard let key = ModifierKey.all[keyCode] else { return }
+
+        let isDown = event.flags.rawValue & key.deviceBit != 0
+        let output: KeyCode
+        if isDown {
+            output = (shouldRemapModifiers ? modifierMapping[keyCode] : nil) ?? keyCode
+            heldModifiers[keyCode] = output
+        } else {
+            output = heldModifiers.removeValue(forKey: keyCode) ?? keyCode
+        }
+
+        if output != keyCode {
+            event.setIntegerValueField(.keyboardEventKeycode, value: Int64(output))
+        }
+        rewriteModifierFlags(event, force: output != keyCode)
+    }
+
+    /// Replaces the modifier flags on an event so held remapped modifiers show up as
+    /// the modifier they were remapped to.
+    private func rewriteModifierFlags(_ event: CGEvent, force: Bool = false) {
+        guard force || heldModifiers.contains(where: { $0.key != $0.value }) else { return }
+        let original = event.flags.rawValue
+        var raw = original & ~ModifierKey.allBits
+        for (code, key) in ModifierKey.all where original & key.deviceBit != 0 {
+            let sentAs = heldModifiers[code] ?? code
+            if let out = ModifierKey.all[sentAs] {
+                raw |= out.deviceBit | out.familyBit
+            }
+        }
+        event.flags = CGEventFlags(rawValue: raw)
+    }
+
+    private var shouldRemapModifiers: Bool {
+        // Swapping modifiers outside Minecraft would break normal shortcuts, so never do it.
+        frontmostIsMinecraft && shouldRemap
     }
 
     private var shouldRemap: Bool {
@@ -202,5 +293,30 @@ final class KeyRemapManager {
             return false
         }
         return !onlyInMinecraft || frontmostIsMinecraft
+    }
+}
+
+/// The modifier keys that can be remapped, with the left/right-specific flag bit macOS
+/// sets while each one is held and the general Shift/Control/Option/Command flag.
+struct ModifierKey {
+    let deviceBit: UInt64
+    let familyBit: UInt64
+
+    static let all: [KeyCode: ModifierKey] = [
+        .control: .init(deviceBit: 0x0001, familyBit: CGEventFlags.maskControl.rawValue),
+        .rightControl: .init(deviceBit: 0x2000, familyBit: CGEventFlags.maskControl.rawValue),
+        .shift: .init(deviceBit: 0x0002, familyBit: CGEventFlags.maskShift.rawValue),
+        .rightShift: .init(deviceBit: 0x0004, familyBit: CGEventFlags.maskShift.rawValue),
+        .command: .init(deviceBit: 0x0008, familyBit: CGEventFlags.maskCommand.rawValue),
+        .rightCommand: .init(deviceBit: 0x0010, familyBit: CGEventFlags.maskCommand.rawValue),
+        .option: .init(deviceBit: 0x0020, familyBit: CGEventFlags.maskAlternate.rawValue),
+        .rightOption: .init(deviceBit: 0x0040, familyBit: CGEventFlags.maskAlternate.rawValue),
+    ]
+
+    static let allBits: UInt64 = all.values.reduce(0) { $0 | $1.deviceBit | $1.familyBit }
+    static let commandDeviceBits: UInt64 = 0x0008 | 0x0010
+
+    static func isRemappable(_ code: KeyCode) -> Bool {
+        all[code] != nil
     }
 }
