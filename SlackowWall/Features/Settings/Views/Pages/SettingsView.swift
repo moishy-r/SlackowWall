@@ -42,6 +42,10 @@ struct SettingsView: View {
                         KeybindingsSettings()
                     case .wall_keybindings:
                         WallKeybindingsSettings()
+                    case .key_remapping:
+                        KeyRemapSettings()
+                    case .cursor:
+                        CursorSettings()
                     case .personalize:
                         PersonalizeSettings()
                     case .profiles:

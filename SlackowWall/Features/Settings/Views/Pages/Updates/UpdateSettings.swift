@@ -17,6 +17,14 @@ struct UpdateSettings: View {
 
     var body: some View {
         VStack {
+            if UpdateManager.updatesDisabled {
+                SettingsLabel(
+                    title: "Updates Disabled",
+                    description:
+                        "This is a customized build of SlackowWall. Automatic updates are turned off so your changes aren't replaced by an official release."
+                )
+            }
+
             SettingsCardView {
                 VStack {
                     SettingsToggleView(
@@ -41,6 +49,7 @@ struct UpdateSettings: View {
                     //                    )
                 }
             }
+            .disabled(UpdateManager.updatesDisabled)
 
             VStack {
                 Text(appInformation)
@@ -79,6 +88,7 @@ struct UpdateSettings: View {
                 Button(action: { updateManager.checkForUpdates() }) {
                     Image(systemName: "arrow.clockwise")
                 }
+                .disabled(UpdateManager.updatesDisabled)
                 .popoverLabel("Check for updates")
             }
         }

@@ -140,6 +140,7 @@ struct SlackowWallApp: App {
                     Button("Check for updates...") {
                         UpdateManager.shared.checkForUpdates()
                     }
+                    .disabled(UpdateManager.updatesDisabled)
                 })
             CommandGroup(after: .help) {
                 Divider()
@@ -185,6 +186,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         OBSManager.shared.writeScript()
         MouseSensitivityManager.shared.setSensitivityFactor(factor: Settings[\.utility].sensitivityScale)
+        KeyRemapManager.shared.start()
+        CursorOverlayManager.shared.start()
         if Settings[\.utility].ninjabrainBotAutoLaunch {
             NinjabrainManager.startIfClosed()
             NinjabrainManager.shared.listenToNinbot()

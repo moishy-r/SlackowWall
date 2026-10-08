@@ -41,16 +41,22 @@ struct EyeProjectorView: View {
                     utility.eyeProjectorStretchedOverlay ? "stretched_overlay" : "tall_overlay"))
     }
 
+    private var eyeVerticalScale: CGFloat {
+        let widthRatio = Double(utility.eyeProjectorOverlayWidth) / 384
+        return utility.eyeProjectorHeightScale * f * widthRatio
+    }
+
+    private func offsetOverlayX(offset: Int, width: CGFloat) -> CGFloat {
+        let perIncrement = width / Double(utility.eyeProjectorOverlayWidth)
+        return CGFloat(offset) * perIncrement - (width / 240 / 2)
+    }
+
     var body: some View {
         GeometryReader { geo in
             ZStack {
                 if screenRecorder.projectorMode == .eye {
                     previewRenderer.instance.eyeProjectorStream.capturePreview
-                        .scaleEffect(
-                            x: 1,
-                            y: utility.eyeProjectorHeightScale * f
-                                * (Double(utility.eyeProjectorOverlayWidth) / 384)
-                        )
+                        .scaleEffect(x: 1, y: eyeVerticalScale)
                     overlayImage
                         .resizable()
                         .frame(width: geo.size.width)
@@ -62,9 +68,7 @@ struct EyeProjectorView: View {
                             .foregroundStyle(.green)
                             .frame(width: geo.size.width / 240)
                             .opacity(0.7)
-                            .offset(
-                                x: CGFloat(offset) * geo.size.width / Double(utility.eyeProjectorOverlayWidth)
-                                    - (geo.size.width / 240 / 2))
+                            .offset(x: offsetOverlayX(offset: offset, width: geo.size.width))
                     }
                 } else if screenRecorder.projectorMode == .pie_and_e {
                     previewRenderer.instance.eyeProjectorStream.capturePreview

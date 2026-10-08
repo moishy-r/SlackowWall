@@ -15,9 +15,13 @@ final class UpdateManager: NSObject, ObservableObject, SPUUpdaterDelegate {
     @AppStorage("lastAppBuild") var lastAppBuild: String = ""
     @AppStorage("updateChannel") var updateChannel: UpdateChannel = .release
 
+    // Custom fork: Sparkle is never started, so this build can't replace itself
+    // with an official release and lose its customizations.
+    static let updatesDisabled = true
+
     private lazy var updaterController: SPUStandardUpdaterController = {
         SPUStandardUpdaterController(
-            startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
+            startingUpdater: !UpdateManager.updatesDisabled, updaterDelegate: self, userDriverDelegate: nil)
     }()
 
     static let shared = UpdateManager()
@@ -73,8 +77,13 @@ final class UpdateManager: NSObject, ObservableObject, SPUUpdaterDelegate {
         updaterController.updater.publisher(for: \.canCheckForUpdates)
             .assign(to: &$canCheckForUpdates)
 
+        if UpdateManager.updatesDisabled {
+            checkAutomatically = false
+            downloadAutomatically = false
+        }
+
         let _ = automaticallyDownloadUpdates
-        if automaticallyCheckForUpdates {
+        if !UpdateManager.updatesDisabled && automaticallyCheckForUpdates {
             updaterController.updater.checkForUpdatesInBackground()
         }
 
@@ -85,6 +94,7 @@ final class UpdateManager: NSObject, ObservableObject, SPUUpdaterDelegate {
     }
 
     func checkForUpdates() {
+        guard !UpdateManager.updatesDisabled else { return }
         updaterController.checkForUpdates(nil)
     }
 
